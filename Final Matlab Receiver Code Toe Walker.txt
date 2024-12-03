@@ -1,0 +1,159 @@
+% MATLAB script to receive data from TinyZero and plot in real-time
+
+% Define serial port settings
+serialPort = 'COM3'; % Adjust this to your actual serial port
+baudRate = 115200;
+
+% Create serial port object
+s = serialport(serialPort, baudRate);
+
+% Check if the serial port object is valid
+if isempty(s)
+    error('Failed to establish serial connection.');
+else
+    disp('Serial connection established successfully.');
+end
+
+data = readline(s);
+disp(['Received data: ', data]); % Display the received data for debugging
+
+% Initialize variables for data storage
+voltage0_data = [];
+voltage1_data = [];
+voltage2_data = [];
+voltage3_data = [];
+acc_x_data = [];
+acc_y_data = [];
+acc_z_data = [];
+time_data = [];
+sampling_intervals = [];
+
+% Initialize figure for real-time plotting
+figure;
+
+% Top subplot for voltages
+subplot(2,1,1);
+hold on;
+h1 = animatedline('DisplayName', 'Voltage0', 'Color', 'r', 'LineWidth', 1.5);
+h2 = animatedline('DisplayName', 'Voltage1', 'Color', 'g', 'LineWidth', 1.5);
+h3 = animatedline('DisplayName', 'Voltage2', 'Color', 'b', 'LineWidth', 1.5);
+h4 = animatedline('DisplayName', 'Voltage3', 'Color', 'c', 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('Voltage (V)');
+title('Voltage Readings Over Time');
+legend('Location', 'northwest');
+grid on;
+hold off;
+
+% Bottom subplot for accelerometer data
+subplot(2,1,2);
+hold on;
+h5 = animatedline('DisplayName', 'Acc X', 'Color', 'm', 'LineWidth', 1.5);
+h6 = animatedline('DisplayName', 'Acc Y', 'Color', 'y', 'LineWidth', 1.5);
+h7 = animatedline('DisplayName', 'Acc Z', 'Color', 'k', 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('Acceleration (g)');
+title('Accelerometer Readings Over Time');
+legend('Location', 'northwest');
+grid on;
+hold off;
+
+% Start time
+startTime = datetime('now');
+
+% Main loop to read and plot data in real-time
+try
+    while true
+        % Clear the serial buffer
+        %flush(s);
+
+        % Read data from serial port
+        data = readline(s);
+
+        % Check if the data format is correct
+        if ~contains(data, "No data available")
+            values = str2double(strsplit(data, ','));
+            if length(values) == 7
+                % Allow voltages to range between -3V and +3V
+                scaled_voltage0 = max(min(values(1), 3), -3);
+                scaled_voltage1 = max(min(values(2), 3), -3);
+                scaled_voltage2 = max(min(values(3), 3), -3);
+                scaled_voltage3 = max(min(values(4), 3), -3);
+                
+                % Normalize accelerometer data to range -1 to 1 (assuming values range from -1000 to 1000)
+                scaled_acc_x = values(5);
+                scaled_acc_y = values(6);
+                scaled_acc_z = values(7);
+
+                % Append data to storage variables
+                voltage0_data(end+1) = scaled_voltage0;
+                voltage1_data(end+1) = scaled_voltage1;
+                voltage2_data(end+1) = scaled_voltage2;
+                voltage3_data(end+1) = scaled_voltage3;
+                acc_x_data(end+1) = scaled_acc_x;
+                acc_y_data(end+1) = scaled_acc_y;
+                acc_z_data(end+1) = scaled_acc_z;
+
+                currentTime = datetime('now');
+                elapsedTime = seconds(currentTime - startTime);
+                time_data(end+1) = elapsedTime;
+
+                % Add points to animated lines for real-time plotting
+
+                % Update top subplot (voltages)
+                subplot(2,1,1);
+                addpoints(h1, elapsedTime, voltage0_data(end));
+                addpoints(h2, elapsedTime, voltage1_data(end));
+                addpoints(h3, elapsedTime, voltage2_data(end));
+                addpoints(h4, elapsedTime, voltage3_data(end));
+
+                % Update bottom subplot (accelerometer data)
+                subplot(2,1,2);
+                addpoints(h5, elapsedTime, acc_x_data(end));
+                addpoints(h6, elapsedTime, acc_y_data(end));
+                addpoints(h7, elapsedTime, acc_z_data(end));
+
+                % Update plot every 10 iterations to improve performance
+                if mod(length(time_data), 10) == 0
+                    drawnow;
+                end
+
+                % Calculate sampling interval
+                if length(time_data) > 1
+                    sampling_intervals(end+1) = time_data(end) - time_data(end-1);
+                    avg_sampling_interval = mean(sampling_intervals);
+                    avg_sampling_rate = 1 / avg_sampling_interval;
+                    disp(['Current average sampling rate: ', num2str(avg_sampling_rate), ' Hz']);
+                end
+            else
+                disp('Incorrect data format received.');
+            end
+        end
+
+        % Reduce pause duration to minimize lag
+        pause(0.01);
+    end
+catch
+    % Display sampling rate when the script is stopped
+    if ~isempty(sampling_intervals)
+        avg_sampling_interval = mean(sampling_intervals);
+        disp(['Average sampling interval: ', num2str(avg_sampling_interval), ' seconds']);
+        disp(['Average sampling rate: ', num2str(1/avg_sampling_interval), ' Hz']);
+    end
+
+    % Write data to CSV file
+    dataMatrix = [time_data', voltage0_data', voltage1_data', voltage2_data', voltage3_data', acc_x_data', acc_y_data', acc_z_data'];
+    csvFileName = 'C:\Users\TayJR\OneDrive\Desktop\Toe Walker Project Files\Wireless Transmit Receive\sensor_data.csv';
+    writematrix(dataMatrix, csvFileName);
+
+    % Append sampling rate information to the CSV file
+    fileID = fopen(csvFileName, 'a');
+    fprintf(fileID, '\nAverage sampling interval: %f seconds\n', avg_sampling_interval);
+    fprintf(fileID, 'Average sampling rate: %f Hz\n', 1/avg_sampling_interval);
+    fclose(fileID);
+
+    disp(['Data saved to ', csvFileName]);
+end
+
+% Clean up
+clear s;

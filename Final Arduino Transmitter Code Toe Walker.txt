@@ -1,0 +1,251 @@
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+#include <SPI.h>
+#include <RH_NRF24.h>
+#include "BMA250.h"  // For interfacing with the BMA250 accelerometer
+
+// Create an ADS1115 instance
+Adafruit_ADS1115 ads;
+
+// Create a BMA250 accelerometer instance
+BMA250 accel_sensor;
+
+// Define thresholds and parameters
+const float frontThreshold = 1.5;      // Threshold for front piezo
+const float rearThreshold = 1.5;       // Threshold for rear piezo
+const float idleThreshold = 0.05;      // Threshold to consider voltages near baseline
+const int stepCountThreshold = 3;      // Number of steps required to trigger the buzzer
+const int stepWindowMillis = 5000;     // Time window in milliseconds to count steps
+
+// NRF24L01 setup on pins 9 (CE) and 7 (CSN)
+RH_NRF24 nrf24(9, 7);
+
+#if defined(ARDUINO_ARCH_AVR)
+  #define SerialMonitorInterface Serial
+#elif defined(ARDUINO_ARCH_SAMD)
+  #define SerialMonitorInterface SerialUSB
+#else
+  #define SerialMonitorInterface Serial
+#endif
+
+// Buzzer control pin (reassigned to avoid conflict with MISO)
+const int buzzerSignalPin = A0; // Changed from A0 to avoid SPI conflict
+
+// Step counting variables
+int stepCount = 0;
+unsigned long startTime = 0;
+
+// Baseline tracking for each piezo sensor
+float baselineVoltage0 = 0, baselineVoltage1 = 0, baselineVoltage2 = 0, baselineVoltage3 = 0;
+const float baselineAlpha = 0.1;
+
+// Mode tracking
+enum Mode { IDLE, WALKING, TOE_WALKING };
+Mode currentMode = IDLE;
+
+bool modeChanged = false;
+
+// Function to activate the buzzer
+void activateBuzzer() {
+    digitalWrite(buzzerSignalPin, HIGH);
+    delay(2000); // Buzzer ON for 2 seconds
+    digitalWrite(buzzerSignalPin, LOW);
+}
+
+// Function to read voltage with baseline correction
+float readFilteredVoltage(float currentVoltage, float &baseline) {
+    baseline = baselineAlpha * currentVoltage + (1 - baselineAlpha) * baseline;
+    return currentVoltage - baseline; // Baseline-corrected value
+}
+
+void setup() {
+  SerialMonitorInterface.begin(115200);  // Initialize serial communication
+  while (!SerialMonitorInterface);       // Wait for the serial port to be available
+  delay(100);                            // Allow time for initialization
+
+  SerialMonitorInterface.println("Initializing...");
+
+  // Initialize the ADS1115 with the I2C address 0x48
+  if (!ads.begin(0x48)) {
+    SerialMonitorInterface.println("Failed to initialize ADS1115.");
+    //while (1);
+  } else {
+    SerialMonitorInterface.println("ADS1115 initialized.");
+  }
+
+  // Set the gain to +/- 4.096V (1 bit = 0.125mV)
+  ads.setGain(GAIN_ONE);
+
+  // Initialize the BMA250 accelerometer with error checking
+  SerialMonitorInterface.print("Initializing BMA250...");
+  Wire.begin();
+  if (accel_sensor.begin(BMA250_RANGE_2G, BMA250_UPDATE_TIME_64MS) == -1) {
+      SerialMonitorInterface.println("BMA250 initialization failed.");
+      while (1); // Halt if initialization fails
+  }
+  SerialMonitorInterface.println("BMA250 initialized.");
+
+  // Initialize NRF24L01
+  if (!nrf24.init()) {
+      SerialMonitorInterface.println("NRF24 init failed");
+      while (1); // Halt if initialization fails
+  } else {
+      SerialMonitorInterface.println("NRF24 init succeeded");
+  }
+
+  if (!nrf24.setChannel(1)) {
+      SerialMonitorInterface.println("NRF24 channel setup failed.");
+      while (1); // Halt if setup fails
+  }
+
+  if (!nrf24.setRF(RH_NRF24::DataRate250kbps, RH_NRF24::TransmitPower0dBm)) {
+      SerialMonitorInterface.println("NRF24 RF setup failed.");
+      while (1); // Halt if setup fails
+  }
+
+  SPI.setClockDivider(4);
+
+  // Initialize the buzzer pin
+  pinMode(buzzerSignalPin, OUTPUT);
+  digitalWrite(buzzerSignalPin, LOW);
+
+  // Initialize step counting timer
+  startTime = millis();
+}
+
+void loop() {
+  // Read all four channels from the ADS1115
+  int16_t rawReading0 = ads.readADC_SingleEnded(0);
+  int16_t rawReading1 = ads.readADC_SingleEnded(1);
+  int16_t rawReading2 = ads.readADC_SingleEnded(2);
+  int16_t rawReading3 = ads.readADC_SingleEnded(3);
+
+  float voltage0 = ads.computeVolts(rawReading0);
+  float voltage1 = ads.computeVolts(rawReading1);
+  float voltage2 = ads.computeVolts(rawReading2);
+  float voltage3 = ads.computeVolts(rawReading3);
+
+  // Get accelerometer data
+  accel_sensor.read();
+  int16_t x = accel_sensor.X;  // Assuming sensitivity of 256LSB/g for 2g range
+  int16_t y = accel_sensor.Y;
+  int16_t z = accel_sensor.Z;
+
+  // Apply baseline filtering
+  float filteredVoltage0 = readFilteredVoltage(voltage0, baselineVoltage0);
+  float filteredVoltage1 = readFilteredVoltage(voltage1, baselineVoltage1);
+  float filteredVoltage2 = readFilteredVoltage(voltage2, baselineVoltage2);
+  float filteredVoltage3 = readFilteredVoltage(voltage3, baselineVoltage3);
+
+  // Clamp voltages to 3.0V
+  if (filteredVoltage0 > 3.0) filteredVoltage0 = 3.0;
+  if (filteredVoltage1 > 3.0) filteredVoltage1 = 3.0;
+  if (filteredVoltage2 > 3.0) filteredVoltage2 = 3.0;
+  if (filteredVoltage3 > 3.0) filteredVoltage3 = 3.0;
+
+  // Remove negative voltages
+  if (filteredVoltage0 < 0.0) filteredVoltage0 = 0.0;
+  if (filteredVoltage1 < 0.0) filteredVoltage1 = 0.0;
+  if (filteredVoltage2 < 0.0) filteredVoltage2 = 0.0;
+  if (filteredVoltage3 < 0.0) filteredVoltage3 = 0.0;
+
+  // Mode Detection Logic
+  bool frontActive = (filteredVoltage0 >= frontThreshold) || (filteredVoltage1 >= frontThreshold);
+  bool rearActive = (filteredVoltage2 >= rearThreshold) || (filteredVoltage3 >= rearThreshold);
+  bool anyActive = frontActive || rearActive;
+  bool allInactive = (filteredVoltage0 < idleThreshold) && (filteredVoltage1 < idleThreshold) &&
+                     (filteredVoltage2 < idleThreshold) && (filteredVoltage3 < idleThreshold);
+
+  Mode previousMode = currentMode;
+
+  if (allInactive) {
+    currentMode = IDLE;
+  } else if (frontActive && rearActive) {
+    currentMode = WALKING;
+  } else if (frontActive && !rearActive) {
+    currentMode = TOE_WALKING;
+  } else if (!frontActive && rearActive) {
+    currentMode = WALKING;
+  } else {
+    // Default to IDLE if none of the above conditions are met
+    currentMode = IDLE;
+  }
+
+  // Handle Mode Changes
+  //if (currentMode != previousMode) {
+  //  modeChanged = true;
+  //} else {
+  //  modeChanged = false;
+  //}
+
+  // (Optional) Display mode messages once when mode changes
+  //if (modeChanged) {
+  //  switch (currentMode) {
+  //    case IDLE:
+  //      SerialMonitorInterface.println("Idle Mode");
+  //      break;
+  //    case WALKING:
+  //      SerialMonitorInterface.println("Walking Mode");
+  //      break;
+  //    case TOE_WALKING:
+  //      SerialMonitorInterface.println("Toe Walking Mode");
+  //      break;
+  //  }
+  //}
+
+  // Handle Toe Walking Detection and Buzzer Activation
+  if (currentMode == TOE_WALKING) {
+    // Increment step count if within the time window
+    if (millis() - startTime <= stepWindowMillis) {
+      stepCount++;
+    } else {
+      // Reset step counting for the next window
+      stepCount = 1; // Start counting the new step
+      startTime = millis();
+    }
+
+    // Buzzer activation on step threshold
+    if (stepCount >= stepCountThreshold) {
+      SerialMonitorInterface.println("Toe Walking detected!");
+      activateBuzzer();
+      // Reset step count after detection
+      stepCount = 0;
+      startTime = millis();
+    }
+  } else {
+    // Reset step counting if not in TOE_WALKING mode
+    stepCount = 0;
+    startTime = millis();
+  }
+
+  // Create a buffer to hold the data (22 bytes: 4 floats + 3 int16_t)
+  uint8_t data[22];
+  memcpy(data, &filteredVoltage0, sizeof(float));
+  memcpy(data + sizeof(float), &filteredVoltage1, sizeof(float));
+  memcpy(data + 2 * sizeof(float), &filteredVoltage2, sizeof(float));
+  memcpy(data + 3 * sizeof(float), &filteredVoltage3, sizeof(float));
+  memcpy(data + 4 * sizeof(float), &x, sizeof(int16_t));
+  memcpy(data + 4 * sizeof(float) + sizeof(int16_t), &y, sizeof(int16_t));
+  memcpy(data + 4 * sizeof(float) + 2 * sizeof(int16_t), &z, sizeof(int16_t));
+
+  // Send the data
+  nrf24.send(data, sizeof(data));
+  nrf24.waitPacketSent();
+
+  // Print to Serial Monitor
+  SerialMonitorInterface.print(filteredVoltage0, 6);
+  SerialMonitorInterface.print(",");
+  SerialMonitorInterface.print(filteredVoltage1, 6);
+  SerialMonitorInterface.print(",");
+  SerialMonitorInterface.print(filteredVoltage2, 6);
+  SerialMonitorInterface.print(",");
+  SerialMonitorInterface.print(filteredVoltage3, 6);
+  SerialMonitorInterface.print(",");
+  SerialMonitorInterface.print(x);
+  SerialMonitorInterface.print(",");
+  SerialMonitorInterface.print(y);
+  SerialMonitorInterface.print(",");
+  SerialMonitorInterface.println(z);
+
+  delay(0);  // Small delay to avoid flooding
+}

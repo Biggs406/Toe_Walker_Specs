@@ -1,0 +1,84 @@
+#include <SPI.h>
+#include <RH_NRF24.h>
+
+#define use433 0  // 1 if using 433MHz radio, 0 if using NRF24L01
+RH_NRF24 nrf24(9, 7);
+
+#if defined(ARDUINO_ARCH_AVR)
+#define SerialMonitorInterface Serial
+#elif defined(ARDUINO_ARCH_SAMD)
+#define SerialMonitorInterface SerialUSB
+#endif
+
+void setup() {
+  SerialMonitorInterface.begin(115200);
+
+  if (!nrf24.init()) {  // Initialize NRF24L01 radio
+    SerialMonitorInterface.println("NRF24 init failed");
+  } else {
+    SerialMonitorInterface.println("NRF24 init succeeded");
+  }
+
+  if (!nrf24.setChannel(1)) {
+    SerialMonitorInterface.println("setChannel failed");
+  }
+
+  if (!nrf24.setRF(RH_NRF24::DataRate250kbps, RH_NRF24::TransmitPower0dBm)) {
+    SerialMonitorInterface.println("setRF failed");
+  }
+
+  SerialMonitorInterface.println("Receiver setup complete");
+}
+
+void loop() {
+    if (nrf24.available()) {
+        uint8_t buf[22];
+        uint8_t len = sizeof(buf);
+
+        if (nrf24.recv(buf, &len)) {
+            // Process received data
+            float filteredVoltage0, filteredVoltage1, filteredVoltage2, filteredVoltage3;
+            int16_t accelX, accelY, accelZ;
+
+            memcpy(&filteredVoltage0, buf, sizeof(float));
+            memcpy(&filteredVoltage1, buf + sizeof(float), sizeof(float));
+            memcpy(&filteredVoltage2, buf + 2 * sizeof(float), sizeof(float));
+            memcpy(&filteredVoltage3, buf + 3 * sizeof(float), sizeof(float));
+            memcpy(&accelX, buf + 4 * sizeof(float), sizeof(int16_t));
+            memcpy(&accelY, buf + 4 * sizeof(float) + sizeof(int16_t), sizeof(int16_t));
+            memcpy(&accelZ, buf + 4 * sizeof(float) + 2 * sizeof(int16_t), sizeof(int16_t));
+
+            // Scale data
+      filteredVoltage0 = constrain(filteredVoltage0, 0.0, 3.3); // Limit voltages to 0-3.3V range
+      filteredVoltage1 = constrain(filteredVoltage1, 0.0, 3.3);
+      filteredVoltage2 = constrain(filteredVoltage2, 0.0, 3.3);
+      filteredVoltage3 = constrain(filteredVoltage3, 0.0, 3.3);
+
+      // Normalize accelerometer data (range 0-1000 -> 0.001 to 1)
+      float scaledAccelX = constrain((float)accelX / 1000.0, 0.001, 1.0);
+      float scaledAccelY = constrain((float)accelY / 1000.0, 0.001, 1.0);
+      float scaledAccelZ = constrain((float)accelZ / 1000.0, 0.001, 1.0);
+
+
+            // Print received data
+            SerialMonitorInterface.print(filteredVoltage0, 6);
+            SerialMonitorInterface.print(",");
+            SerialMonitorInterface.print(filteredVoltage1, 6);
+            SerialMonitorInterface.print(",");
+            SerialMonitorInterface.print(filteredVoltage2, 6);
+            SerialMonitorInterface.print(",");
+            SerialMonitorInterface.print(filteredVoltage3, 6);
+            SerialMonitorInterface.print(",");
+            SerialMonitorInterface.print(accelX);
+            SerialMonitorInterface.print(",");
+            SerialMonitorInterface.print(accelY);
+            SerialMonitorInterface.print(",");
+            SerialMonitorInterface.println(accelZ);
+        } else {
+            SerialMonitorInterface.println("Receive failed");
+        }
+    } else {
+        
+    }
+    delay(0);  // Small delay to prevent flooding
+}
